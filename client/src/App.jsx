@@ -1,122 +1,76 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { useEffect, useState } from "react";
+import { io } from "socket.io-client";
+
+const socket = io("http://localhost:3000");
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [me, setMe] = useState(null);
+  const [room, setRoom] = useState(null);
+  const [devices, setDevices] = useState([]);
+  const [codeInput, setCodeInput] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    socket.on("welcome", (info) => setMe(info));
+    socket.on("room-joined", (code) => {
+      setRoom(code);
+      setError("");
+    });
+    socket.on("room-left", () => {
+      setRoom(null);
+      setDevices([]);
+    });
+    socket.on("room-error", (msg) => setError(msg));
+    socket.on("device-list", (list) => setDevices(list));
+
+    return () => {
+      socket.off("welcome");
+      socket.off("room-joined");
+      socket.off("room-left");
+      socket.off("room-error");
+      socket.off("device-list");
+    };
+  }, []);
+
+  const others = devices.filter((d) => d.id !== me?.id);
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
+    <div style={{ padding: 24, fontFamily: "sans-serif" }}>
+      <h1>PeerDrop</h1>
+      <p>{me ? `You are ${me.name}` : "Connecting..."}</p>
+
+      {!room ? (
         <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
+          <button onClick={() => socket.emit("create-room")}>
+            Create room
+          </button>
+          <p>or join a room:</p>
+          <input
+            value={codeInput}
+            onChange={(e) => setCodeInput(e.target.value)}
+            placeholder="Enter room code"
+          />
+          <button onClick={() => socket.emit("join-room", codeInput)}>
+            Join
+          </button>
+          {error && <p style={{ color: "red" }}>{error}</p>}
         </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+      ) : (
+        <div>
+          <h2>Room code: {room}</h2>
+          <button onClick={() => socket.emit("leave-room")}>Leave room</button>
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
+          <h3>Other devices in this room</h3>
+          {others.length === 0 && <p>Waiting for others to join...</p>}
           <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
+            {others.map((d) => (
+              <li key={d.id}>{d.name}</li>
+            ))}
           </ul>
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+      )}
+    </div>
+  );
 }
 
-export default App
+export default App;
