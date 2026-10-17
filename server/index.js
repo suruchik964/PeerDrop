@@ -88,6 +88,13 @@ io.on("connection", (socket) => {
     socket.emit("room-left");
   });
 
+    socket.on("signal", ({ to, data }) => {
+      const sender = devices.get(socket.id);
+      const target = devices.get(to);
+      if (!sender || !target || sender.room !== target.room) return;
+      io.to(to).emit("signal", { from: socket.id, data });
+    });
+
   socket.on("disconnect", () => {
     leaveRoom(socket);
     devices.delete(socket.id);
