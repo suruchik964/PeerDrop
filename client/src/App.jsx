@@ -6,6 +6,9 @@ const socket = io("http://localhost:3000");
 // Google's free STUN server: tells us our outside address
 const ICE_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
+const CHUNK_SIZE = 16 * 1024;       // size of each piece: 16 KB
+const MAX_SIZE = 5 * 1024 * 1024;   // temporary limit: 5 MB
+
 function App() {
   const [me, setMe] = useState(null);
   const [room, setRoom] = useState(null);
@@ -16,6 +19,8 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
   const [received, setReceived] = useState([]);
+  const [sendProgress, setSendProgress] = useState(null);
+  const [receiveProgress, setReceiveProgress] = useState(null);
 
   const peerRef = useRef(null); // the WebRTC connection
   const channelRef = useRef(null); // the data channel (used in Step 4)
@@ -56,14 +61,25 @@ function App() {
         if (msg.type === "chat") {
           setMessages((m) => [...m, { from: "them", text: msg.text }]);
         } else if (msg.type === "file-meta") {
-          incomingRef.current = msg;
+          // A file is about to arrive: prepare an empty list for its pieces
+          incomingRef.current = { ...msg, chunks: [], received: 0 };
+          setReceiveProgress(0);
         }
       } else {
+        // This is one piece of the file
         const meta = incomingRef.current;
-        const blob = new Blob([e.data], { type: meta.mime });
-        const url = URL.createObjectURL(blob);
-        setReceived((r) => [...r, { name: meta.name, size: meta.size, url }]);
-        incomingRef.current = null;
+        meta.chunks.push(e.data);
+        meta.received += e.data.byteLength;
+        setReceiveProgress(Math.round((meta.received / meta.size) * 100));
+
+        if (meta.received >= meta.size) {
+          // Got everything: join the pieces into one file
+          const blob = new Blob(meta.chunks, { type: meta.mime });
+          const url = URL.createObjectURL(blob);
+          setReceived((r) => [...r, { name: meta.name, size: meta.size, url }]);
+          incomingRef.current = null;
+          setReceiveProgress(null);
+        }
       }
     };
   }
@@ -79,16 +95,21 @@ function App() {
   async function sendFile(e) {
     const file = e.target.files[0];
     const channel = channelRef.current;
+    e.target.value = "";
     if (!file || !channel || channel.readyState !== "open") return;
 
-    if (file.size > 200 * 1024) {
+    if (file.size === 0) {
+      alert("This file is empty.");
+      return;
+    }
+    if (file.size > MAX_SIZE) {
       alert(
-        "For now, choose a file under 200 KB. Big files come in the next step.",
+        "For now, choose a file under 5 MB. Bigger files come in the next step.",
       );
-      e.target.value = "";
       return;
     }
 
+    // 1. Tell the other side what is coming
     channel.send(
       JSON.stringify({
         type: "file-meta",
@@ -97,9 +118,19 @@ function App() {
         mime: file.type,
       }),
     );
-    channel.send(await file.arrayBuffer());
+
+    // 2. Cut the file into pieces and send them one by one
+    let offset = 0;
+    setSendProgress(0);
+    while (offset < file.size) {
+      const piece = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
+      channel.send(piece);
+      offset += piece.byteLength;
+      setSendProgress(Math.round((offset / file.size) * 100));
+    }
+
+    setSendProgress(null);
     setMessages((m) => [...m, { from: "me", text: `Sent file: ${file.name}` }]);
-    e.target.value = "";
   }
 
   // Candidates can only be added after the other side's card is set
@@ -231,6 +262,19 @@ function App() {
           <p>
             Send a file: <input type="file" onChange={sendFile} />
           </p>
+
+          {sendProgress !== null && (
+            <p>
+              Sending: {sendProgress}%{" "}
+              <progress value={sendProgress} max="100" />
+            </p>
+          )}
+          {receiveProgress !== null && (
+            <p>
+              Receiving: {receiveProgress}%{" "}
+              <progress value={receiveProgress} max="100" />
+            </p>
+          )}
 
           <h3>Received files</h3>
           <ul>
