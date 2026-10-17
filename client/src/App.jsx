@@ -13,10 +13,14 @@ function App() {
   const [codeInput, setCodeInput] = useState("");
   const [error, setError] = useState("");
   const [peerStatus, setPeerStatus] = useState("Not connected");
+  const [messages, setMessages] = useState([]);
+  const [text, setText] = useState("");
+  const [received, setReceived] = useState([]);
 
   const peerRef = useRef(null); // the WebRTC connection
   const channelRef = useRef(null); // the data channel (used in Step 4)
   const pendingRef = useRef([]); // candidates that arrived too early
+  const incomingRef = useRef(null);
 
   // Make a new connection object aimed at one specific device
   function createPeer(targetId) {
@@ -45,6 +49,57 @@ function App() {
     channelRef.current = channel;
     channel.onopen = () => setPeerStatus("Connected directly!");
     channel.onclose = () => setPeerStatus("Channel closed");
+    channel.binaryType = "arraybuffer";
+    channel.onmessage = (e) => {
+      if (typeof e.data === "string") {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "chat") {
+          setMessages((m) => [...m, { from: "them", text: msg.text }]);
+        } else if (msg.type === "file-meta") {
+          incomingRef.current = msg;
+        }
+      } else {
+        const meta = incomingRef.current;
+        const blob = new Blob([e.data], { type: meta.mime });
+        const url = URL.createObjectURL(blob);
+        setReceived((r) => [...r, { name: meta.name, size: meta.size, url }]);
+        incomingRef.current = null;
+      }
+    };
+  }
+
+  function sendMessage() {
+    const channel = channelRef.current;
+    if (!channel || channel.readyState !== "open" || !text.trim()) return;
+    channel.send(JSON.stringify({ type: "chat", text }));
+    setMessages((m) => [...m, { from: "me", text }]);
+    setText("");
+  }
+
+  async function sendFile(e) {
+    const file = e.target.files[0];
+    const channel = channelRef.current;
+    if (!file || !channel || channel.readyState !== "open") return;
+
+    if (file.size > 200 * 1024) {
+      alert(
+        "For now, choose a file under 200 KB. Big files come in the next step.",
+      );
+      e.target.value = "";
+      return;
+    }
+
+    channel.send(
+      JSON.stringify({
+        type: "file-meta",
+        name: file.name,
+        size: file.size,
+        mime: file.type,
+      }),
+    );
+    channel.send(await file.arrayBuffer());
+    setMessages((m) => [...m, { from: "me", text: `Sent file: ${file.name}` }]);
+    e.target.value = "";
   }
 
   // Candidates can only be added after the other side's card is set
@@ -166,6 +221,36 @@ function App() {
           <p>
             <b>Direct connection:</b> {peerStatus}
           </p>
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="Type a message"
+          />
+          <button onClick={sendMessage}>Send</button>
+
+          <p>
+            Send a file: <input type="file" onChange={sendFile} />
+          </p>
+
+          <h3>Received files</h3>
+          <ul>
+            {received.map((f, i) => (
+              <li key={i}>
+                <a href={f.url} download={f.name}>
+                  {f.name}
+                </a>{" "}
+                ({f.size} bytes)
+              </li>
+            ))}
+          </ul>
+
+          <ul>
+            {messages.map((m, i) => (
+              <li key={i}>
+                <b>{m.from === "me" ? "You" : "Them"}:</b> {m.text}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>
