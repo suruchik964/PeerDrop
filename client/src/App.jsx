@@ -7,7 +7,9 @@ const socket = io("http://localhost:3000");
 const ICE_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
 const CHUNK_SIZE = 16 * 1024;       // size of each piece: 16 KB
-const MAX_SIZE = 5 * 1024 * 1024;   // temporary limit: 5 MB
+const MAX_SIZE = 300 * 1024 * 1024;     // limit: 300 MB (explained below)
+const MAX_BUFFER = 1 * 1024 * 1024;     // pause sending if more than 1 MB is waiting
+const LOW_BUFFER = 256 * 1024;          // resume when it drops below 256 KB
 
 function App() {
   const [me, setMe] = useState(null);
@@ -52,6 +54,7 @@ function App() {
 
   function setupChannel(channel) {
     channelRef.current = channel;
+    channel.bufferedAmountLowThreshold = LOW_BUFFER;
     channel.onopen = () => setPeerStatus("Connected directly!");
     channel.onclose = () => setPeerStatus("Channel closed");
     channel.binaryType = "arraybuffer";
@@ -92,6 +95,19 @@ function App() {
     setText("");
   }
 
+  function waitForBuffer(channel) {
+    if (channel.bufferedAmount <= MAX_BUFFER) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        channel.removeEventListener("bufferedamountlow", done);
+        channel.removeEventListener("close", done);
+        resolve();
+      };
+      channel.addEventListener("bufferedamountlow", done);
+      channel.addEventListener("close", done);
+    });
+  }
+
   async function sendFile(e) {
     const file = e.target.files[0];
     const channel = channelRef.current;
@@ -103,9 +119,7 @@ function App() {
       return;
     }
     if (file.size > MAX_SIZE) {
-      alert(
-        "For now, choose a file under 5 MB. Bigger files come in the next step.",
-      );
+      alert("For now, choose a file under 300 MB.");
       return;
     }
 
@@ -122,12 +136,20 @@ function App() {
     // 2. Cut the file into pieces and send them one by one
     let offset = 0;
     setSendProgress(0);
-    while (offset < file.size) {
-      const piece = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
-      channel.send(piece);
-      offset += piece.byteLength;
-      setSendProgress(Math.round((offset / file.size) * 100));
-    }
+      while (offset < file.size) {
+        await waitForBuffer(channel);
+        if (channel.readyState !== "open") {
+          alert("Connection closed during the transfer.");
+          setSendProgress(null);
+          return;
+        }
+        const piece = await file
+          .slice(offset, offset + CHUNK_SIZE)
+          .arrayBuffer();
+        channel.send(piece);
+        offset += piece.byteLength;
+        setSendProgress(Math.round((offset / file.size) * 100));
+      }
 
     setSendProgress(null);
     setMessages((m) => [...m, { from: "me", text: `Sent file: ${file.name}` }]);
