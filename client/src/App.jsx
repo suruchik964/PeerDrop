@@ -65,7 +65,12 @@ function App() {
           setMessages((m) => [...m, { from: "them", text: msg.text }]);
         } else if (msg.type === "file-meta") {
           // A file is about to arrive: prepare an empty list for its pieces
-          incomingRef.current = { ...msg, chunks: [], received: 0 };
+          incomingRef.current = {
+            ...msg,
+            chunks: [],
+            received: 0,
+            lastPercent: -1,
+          };
           setReceiveProgress(0);
         }
       } else {
@@ -73,7 +78,13 @@ function App() {
         const meta = incomingRef.current;
         meta.chunks.push(e.data);
         meta.received += e.data.byteLength;
-        setReceiveProgress(Math.round((meta.received / meta.size) * 100));
+
+        // Update the bar only when the percentage actually changes
+        const percent = Math.round((meta.received / meta.size) * 100);
+        if (percent !== meta.lastPercent) {
+          meta.lastPercent = percent;
+          setReceiveProgress(percent);
+        }
 
         if (meta.received >= meta.size) {
           // Got everything: join the pieces into one file
@@ -136,6 +147,7 @@ function App() {
     // 2. Cut the file into pieces and send them one by one
     let offset = 0;
     setSendProgress(0);
+    let lastPercent = -1;
       while (offset < file.size) {
         await waitForBuffer(channel);
         if (channel.readyState !== "open") {
@@ -148,7 +160,11 @@ function App() {
           .arrayBuffer();
         channel.send(piece);
         offset += piece.byteLength;
-        setSendProgress(Math.round((offset / file.size) * 100));
+        const percent = Math.round((offset / file.size) * 100);
+        if (percent !== lastPercent) {
+          lastPercent = percent;
+          setSendProgress(percent);
+        }      
       }
 
     setSendProgress(null);
