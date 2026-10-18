@@ -11,6 +11,12 @@ const MAX_SIZE = 300 * 1024 * 1024;     // limit: 300 MB (explained below)
 const MAX_BUFFER = 1 * 1024 * 1024;     // pause sending if more than 1 MB is waiting
 const LOW_BUFFER = 256 * 1024;          // resume when it drops below 256 KB
 
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
 function App() {
   const [me, setMe] = useState(null);
   const [room, setRoom] = useState(null);
@@ -23,11 +29,13 @@ function App() {
   const [received, setReceived] = useState([]);
   const [sendProgress, setSendProgress] = useState(null);
   const [receiveProgress, setReceiveProgress] = useState(null);
+  const [incomingOffer, setIncomingOffer] = useState(null);
 
   const peerRef = useRef(null); // the WebRTC connection
   const channelRef = useRef(null); // the data channel (used in Step 4)
   const pendingRef = useRef([]); // candidates that arrived too early
   const incomingRef = useRef(null);
+  const pendingFileRef = useRef(null);
 
   // Make a new connection object aimed at one specific device
   function createPeer(targetId) {
@@ -63,8 +71,19 @@ function App() {
         const msg = JSON.parse(e.data);
         if (msg.type === "chat") {
           setMessages((m) => [...m, { from: "them", text: msg.text }]);
+        } else if (msg.type === "file-offer") {
+          // Someone wants to send us a file: show the prompt
+          setIncomingOffer(msg);
+        } else if (msg.type === "file-accept") {
+          // They said yes: start sending
+          startSending();
+        } else if (msg.type === "file-decline") {
+          pendingFileRef.current = null;
+          setMessages((m) => [
+            ...m,
+            { from: "them", text: "Declined your file." },
+          ]);
         } else if (msg.type === "file-meta") {
-          // A file is about to arrive: prepare an empty list for its pieces
           incomingRef.current = {
             ...msg,
             chunks: [],
@@ -74,12 +93,10 @@ function App() {
           setReceiveProgress(0);
         }
       } else {
-        // This is one piece of the file
         const meta = incomingRef.current;
         meta.chunks.push(e.data);
         meta.received += e.data.byteLength;
 
-        // Update the bar only when the percentage actually changes
         const percent = Math.round((meta.received / meta.size) * 100);
         if (percent !== meta.lastPercent) {
           meta.lastPercent = percent;
@@ -87,7 +104,6 @@ function App() {
         }
 
         if (meta.received >= meta.size) {
-          // Got everything: join the pieces into one file
           const blob = new Blob(meta.chunks, { type: meta.mime });
           const url = URL.createObjectURL(blob);
           setReceived((r) => [...r, { name: meta.name, size: meta.size, url }]);
@@ -119,12 +135,16 @@ function App() {
     });
   }
 
-  async function sendFile(e) {
+  function sendFile(e) {
     const file = e.target.files[0];
     const channel = channelRef.current;
     e.target.value = "";
     if (!file || !channel || channel.readyState !== "open") return;
 
+    if (pendingFileRef.current) {
+      alert("Please wait for the current file to finish.");
+      return;
+    }
     if (file.size === 0) {
       alert("This file is empty.");
       return;
@@ -134,7 +154,26 @@ function App() {
       return;
     }
 
-    // 1. Tell the other side what is coming
+    pendingFileRef.current = file; // remember it until they answer
+    channel.send(
+      JSON.stringify({
+        type: "file-offer",
+        name: file.name,
+        size: file.size,
+        mime: file.type,
+      }),
+    );
+    setMessages((m) => [
+      ...m,
+      { from: "me", text: `Waiting for them to accept: ${file.name}` },
+    ]);
+  }
+
+  async function startSending() {
+    const file = pendingFileRef.current;
+    const channel = channelRef.current;
+    if (!file || !channel || channel.readyState !== "open") return;
+
     channel.send(
       JSON.stringify({
         type: "file-meta",
@@ -144,31 +183,40 @@ function App() {
       }),
     );
 
-    // 2. Cut the file into pieces and send them one by one
     let offset = 0;
-    setSendProgress(0);
     let lastPercent = -1;
-      while (offset < file.size) {
-        await waitForBuffer(channel);
-        if (channel.readyState !== "open") {
-          alert("Connection closed during the transfer.");
-          setSendProgress(null);
-          return;
-        }
-        const piece = await file
-          .slice(offset, offset + CHUNK_SIZE)
-          .arrayBuffer();
-        channel.send(piece);
-        offset += piece.byteLength;
-        const percent = Math.round((offset / file.size) * 100);
-        if (percent !== lastPercent) {
-          lastPercent = percent;
-          setSendProgress(percent);
-        }      
+    setSendProgress(0);
+    while (offset < file.size) {
+      await waitForBuffer(channel);
+      if (channel.readyState !== "open") {
+        alert("Connection closed during the transfer.");
+        setSendProgress(null);
+        pendingFileRef.current = null;
+        return;
       }
+      const piece = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
+      channel.send(piece);
+      offset += piece.byteLength;
+
+      const percent = Math.round((offset / file.size) * 100);
+      if (percent !== lastPercent) {
+        lastPercent = percent;
+        setSendProgress(percent);
+      }
+    }
 
     setSendProgress(null);
+    pendingFileRef.current = null;
     setMessages((m) => [...m, { from: "me", text: `Sent file: ${file.name}` }]);
+  }
+
+  function respondToOffer(accepted) {
+    const channel = channelRef.current;
+    if (!channel || channel.readyState !== "open") return;
+    channel.send(
+      JSON.stringify({ type: accepted ? "file-accept" : "file-decline" }),
+    );
+    setIncomingOffer(null);
   }
 
   // Candidates can only be added after the other side's card is set
@@ -300,6 +348,23 @@ function App() {
           <p>
             Send a file: <input type="file" onChange={sendFile} />
           </p>
+
+          {incomingOffer && (
+            <div
+              style={{
+                border: "1px solid #999",
+                padding: 12,
+                margin: "12px 0",
+              }}
+            >
+              <p>
+                <b>Incoming file:</b> {incomingOffer.name} (
+                {formatSize(incomingOffer.size)})
+              </p>
+              <button onClick={() => respondToOffer(true)}>Accept</button>{" "}
+              <button onClick={() => respondToOffer(false)}>Decline</button>
+            </div>
+          )}
 
           {sendProgress !== null && (
             <p>
