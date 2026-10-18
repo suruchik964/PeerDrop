@@ -1,403 +1,69 @@
-import { useEffect, useRef, useState } from "react";
-import { io } from "socket.io-client";
-
-const socket = io("http://localhost:3000");
-
-// Google's free STUN server: tells us our outside address
-const ICE_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
-
-const CHUNK_SIZE = 16 * 1024;       // size of each piece: 16 KB
-const MAX_SIZE = 300 * 1024 * 1024;     // limit: 300 MB (explained below)
-const MAX_BUFFER = 1 * 1024 * 1024;     // pause sending if more than 1 MB is waiting
-const LOW_BUFFER = 256 * 1024;          // resume when it drops below 256 KB
-
-function formatSize(bytes) {
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-}
+import { useRef } from "react";
+import { useRoom } from "./hooks/useRoom";
+import { useChat } from "./hooks/useChat";
+import { useFileTransfer } from "./hooks/useFileTransfer";
+import { usePeerConnection } from "./hooks/usePeerConnection";
+import RoomPanel from "./components/RoomPanel";
+import DeviceList from "./components/DeviceList";
+import ChatBox from "./components/ChatBox";
+import FileTransfer from "./components/FileTransfer";
 
 function App() {
-  const [me, setMe] = useState(null);
-  const [room, setRoom] = useState(null);
-  const [devices, setDevices] = useState([]);
-  const [codeInput, setCodeInput] = useState("");
-  const [error, setError] = useState("");
-  const [peerStatus, setPeerStatus] = useState("Not connected");
-  const [messages, setMessages] = useState([]);
-  const [text, setText] = useState("");
-  const [received, setReceived] = useState([]);
-  const [sendProgress, setSendProgress] = useState(null);
-  const [receiveProgress, setReceiveProgress] = useState(null);
-  const [incomingOffer, setIncomingOffer] = useState(null);
+  const channelRef = useRef(null); // the direct pipe, shared by the hooks below
 
-  const peerRef = useRef(null); // the WebRTC connection
-  const channelRef = useRef(null); // the data channel (used in Step 4)
-  const pendingRef = useRef([]); // candidates that arrived too early
-  const incomingRef = useRef(null);
-  const pendingFileRef = useRef(null);
+  const roomState = useRoom();
+  const chat = useChat(channelRef);
+  const file = useFileTransfer(channelRef, chat.addMessage);
 
-  // Make a new connection object aimed at one specific device
-  function createPeer(targetId) {
-    const pc = new RTCPeerConnection(ICE_CONFIG);
-
-    pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        socket.emit("signal", {
-          to: targetId,
-          data: { candidate: e.candidate },
-        });
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed") setPeerStatus("Connection failed");
-      if (pc.connectionState === "disconnected") setPeerStatus("Disconnected");
-    };
-
-    peerRef.current = pc;
-    pendingRef.current = [];
-    return pc;
-  }
-
-  function setupChannel(channel) {
-    channelRef.current = channel;
-    channel.bufferedAmountLowThreshold = LOW_BUFFER;
-    channel.onopen = () => setPeerStatus("Connected directly!");
-    channel.onclose = () => setPeerStatus("Channel closed");
-    channel.binaryType = "arraybuffer";
-    channel.onmessage = (e) => {
-      if (typeof e.data === "string") {
-        const msg = JSON.parse(e.data);
-        if (msg.type === "chat") {
-          setMessages((m) => [...m, { from: "them", text: msg.text }]);
-        } else if (msg.type === "file-offer") {
-          // Someone wants to send us a file: show the prompt
-          setIncomingOffer(msg);
-        } else if (msg.type === "file-accept") {
-          // They said yes: start sending
-          startSending();
-        } else if (msg.type === "file-decline") {
-          pendingFileRef.current = null;
-          setMessages((m) => [
-            ...m,
-            { from: "them", text: "Declined your file." },
-          ]);
-        } else if (msg.type === "file-meta") {
-          incomingRef.current = {
-            ...msg,
-            chunks: [],
-            received: 0,
-            lastPercent: -1,
-          };
-          setReceiveProgress(0);
-        }
-      } else {
-        const meta = incomingRef.current;
-        meta.chunks.push(e.data);
-        meta.received += e.data.byteLength;
-
-        const percent = Math.round((meta.received / meta.size) * 100);
-        if (percent !== meta.lastPercent) {
-          meta.lastPercent = percent;
-          setReceiveProgress(percent);
-        }
-
-        if (meta.received >= meta.size) {
-          const blob = new Blob(meta.chunks, { type: meta.mime });
-          const url = URL.createObjectURL(blob);
-          setReceived((r) => [...r, { name: meta.name, size: meta.size, url }]);
-          incomingRef.current = null;
-          setReceiveProgress(null);
-        }
-      }
-    };
-  }
-
-  function sendMessage() {
-    const channel = channelRef.current;
-    if (!channel || channel.readyState !== "open" || !text.trim()) return;
-    channel.send(JSON.stringify({ type: "chat", text }));
-    setMessages((m) => [...m, { from: "me", text }]);
-    setText("");
-  }
-
-  function waitForBuffer(channel) {
-    if (channel.bufferedAmount <= MAX_BUFFER) return Promise.resolve();
-    return new Promise((resolve) => {
-      const done = () => {
-        channel.removeEventListener("bufferedamountlow", done);
-        channel.removeEventListener("close", done);
-        resolve();
-      };
-      channel.addEventListener("bufferedamountlow", done);
-      channel.addEventListener("close", done);
-    });
-  }
-
-  function sendFile(e) {
-    const file = e.target.files[0];
-    const channel = channelRef.current;
-    e.target.value = "";
-    if (!file || !channel || channel.readyState !== "open") return;
-
-    if (pendingFileRef.current) {
-      alert("Please wait for the current file to finish.");
-      return;
+  // Everything that arrives through the pipe comes here first,
+  // and gets handed to the right hook
+  function handleMessage(e) {
+    if (typeof e.data === "string") {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "chat") chat.onIncoming(msg);
+      else file.onIncomingText(msg);
+    } else {
+      file.onIncomingChunk(e.data);
     }
-    if (file.size === 0) {
-      alert("This file is empty.");
-      return;
-    }
-    if (file.size > MAX_SIZE) {
-      alert("For now, choose a file under 300 MB.");
-      return;
-    }
-
-    pendingFileRef.current = file; // remember it until they answer
-    channel.send(
-      JSON.stringify({
-        type: "file-offer",
-        name: file.name,
-        size: file.size,
-        mime: file.type,
-      }),
-    );
-    setMessages((m) => [
-      ...m,
-      { from: "me", text: `Waiting for them to accept: ${file.name}` },
-    ]);
   }
 
-  async function startSending() {
-    const file = pendingFileRef.current;
-    const channel = channelRef.current;
-    if (!file || !channel || channel.readyState !== "open") return;
-
-    channel.send(
-      JSON.stringify({
-        type: "file-meta",
-        name: file.name,
-        size: file.size,
-        mime: file.type,
-      }),
-    );
-
-    let offset = 0;
-    let lastPercent = -1;
-    setSendProgress(0);
-    while (offset < file.size) {
-      await waitForBuffer(channel);
-      if (channel.readyState !== "open") {
-        alert("Connection closed during the transfer.");
-        setSendProgress(null);
-        pendingFileRef.current = null;
-        return;
-      }
-      const piece = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
-      channel.send(piece);
-      offset += piece.byteLength;
-
-      const percent = Math.round((offset / file.size) * 100);
-      if (percent !== lastPercent) {
-        lastPercent = percent;
-        setSendProgress(percent);
-      }
-    }
-
-    setSendProgress(null);
-    pendingFileRef.current = null;
-    setMessages((m) => [...m, { from: "me", text: `Sent file: ${file.name}` }]);
-  }
-
-  function respondToOffer(accepted) {
-    const channel = channelRef.current;
-    if (!channel || channel.readyState !== "open") return;
-    channel.send(
-      JSON.stringify({ type: accepted ? "file-accept" : "file-decline" }),
-    );
-    setIncomingOffer(null);
-  }
-
-  // Candidates can only be added after the other side's card is set
-  async function flushCandidates() {
-    for (const c of pendingRef.current) {
-      await peerRef.current.addIceCandidate(c);
-    }
-    pendingRef.current = [];
-  }
-
-  // The caller starts here
-  async function connectTo(targetId) {
-    setPeerStatus("Connecting...");
-    const pc = createPeer(targetId);
-    setupChannel(pc.createDataChannel("files"));
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    socket.emit("signal", {
-      to: targetId,
-      data: { description: pc.localDescription },
-    });
-  }
-
-  useEffect(() => {
-    socket.on("welcome", (info) => setMe(info));
-    socket.on("room-joined", (code) => {
-      setRoom(code);
-      setError("");
-    });
-    socket.on("room-left", () => {
-      setRoom(null);
-      setDevices([]);
-    });
-    socket.on("room-error", (msg) => setError(msg));
-    socket.on("device-list", (list) => setDevices(list));
-
-    // Messages from the other device, carried by our server
-    socket.on("signal", async ({ from, data }) => {
-      if (data.description) {
-        if (data.description.type === "offer") {
-          // We are the receiver
-          setPeerStatus("Connecting...");
-          const pc = createPeer(from);
-          pc.ondatachannel = (e) => setupChannel(e.channel);
-          await pc.setRemoteDescription(data.description);
-          await flushCandidates();
-
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          socket.emit("signal", {
-            to: from,
-            data: { description: pc.localDescription },
-          });
-        } else {
-          // We are the caller and the answer arrived
-          await peerRef.current.setRemoteDescription(data.description);
-          await flushCandidates();
-        }
-      } else if (data.candidate) {
-        const pc = peerRef.current;
-        if (pc && pc.remoteDescription) {
-          await pc.addIceCandidate(data.candidate);
-        } else {
-          pendingRef.current.push(data.candidate); // too early, keep it for later
-        }
-      }
-    });
-
-    return () => {
-      socket.off("welcome");
-      socket.off("room-joined");
-      socket.off("room-left");
-      socket.off("room-error");
-      socket.off("device-list");
-      socket.off("signal");
-    };
-  }, []);
-
-  const others = devices.filter((d) => d.id !== me?.id);
+  const { peerStatus, connectTo } = usePeerConnection(
+    channelRef,
+    handleMessage,
+  );
 
   return (
     <div style={{ padding: 24, fontFamily: "sans-serif" }}>
       <h1>PeerDrop</h1>
-      <p>{me ? `You are ${me.name}` : "Connecting to server..."}</p>
+      <p>
+        {roomState.me
+          ? `You are ${roomState.me.name}`
+          : "Connecting to server..."}
+      </p>
 
-      {!room ? (
-        <div>
-          <button onClick={() => socket.emit("create-room")}>
-            Create room
-          </button>
-          <p>or join a room:</p>
-          <input
-            value={codeInput}
-            onChange={(e) => setCodeInput(e.target.value)}
-            placeholder="Enter room code"
-          />
-          <button onClick={() => socket.emit("join-room", codeInput)}>
-            Join
-          </button>
-          {error && <p style={{ color: "red" }}>{error}</p>}
-        </div>
+      {!roomState.room ? (
+        <RoomPanel
+          onCreate={roomState.createRoom}
+          onJoin={roomState.joinRoom}
+          error={roomState.error}
+        />
       ) : (
         <div>
-          <h2>Room code: {room}</h2>
-          <button onClick={() => socket.emit("leave-room")}>Leave room</button>
+          <h2>Room code: {roomState.room}</h2>
+          <button onClick={roomState.leaveRoom}>Leave room</button>
 
-          <h3>Other devices in this room</h3>
-          {others.length === 0 && <p>Waiting for others to join...</p>}
-          <ul>
-            {others.map((d) => (
-              <li key={d.id}>
-                {d.name}{" "}
-                <button onClick={() => connectTo(d.id)}>Connect</button>
-              </li>
-            ))}
-          </ul>
-
-          <p>
-            <b>Direct connection:</b> {peerStatus}
-          </p>
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Type a message"
+          <DeviceList
+            others={roomState.others}
+            onConnect={connectTo}
+            peerStatus={peerStatus}
           />
-          <button onClick={sendMessage}>Send</button>
-
-          <p>
-            Send a file: <input type="file" onChange={sendFile} />
-          </p>
-
-          {incomingOffer && (
-            <div
-              style={{
-                border: "1px solid #999",
-                padding: 12,
-                margin: "12px 0",
-              }}
-            >
-              <p>
-                <b>Incoming file:</b> {incomingOffer.name} (
-                {formatSize(incomingOffer.size)})
-              </p>
-              <button onClick={() => respondToOffer(true)}>Accept</button>{" "}
-              <button onClick={() => respondToOffer(false)}>Decline</button>
-            </div>
-          )}
-
-          {sendProgress !== null && (
-            <p>
-              Sending: {sendProgress}%{" "}
-              <progress value={sendProgress} max="100" />
-            </p>
-          )}
-          {receiveProgress !== null && (
-            <p>
-              Receiving: {receiveProgress}%{" "}
-              <progress value={receiveProgress} max="100" />
-            </p>
-          )}
-
-          <h3>Received files</h3>
-          <ul>
-            {received.map((f, i) => (
-              <li key={i}>
-                <a href={f.url} download={f.name}>
-                  {f.name}
-                </a>{" "}
-                ({f.size} bytes)
-              </li>
-            ))}
-          </ul>
-
-          <ul>
-            {messages.map((m, i) => (
-              <li key={i}>
-                <b>{m.from === "me" ? "You" : "Them"}:</b> {m.text}
-              </li>
-            ))}
-          </ul>
+          <ChatBox
+            messages={chat.messages}
+            text={chat.text}
+            setText={chat.setText}
+            onSend={chat.sendMessage}
+          />
+          <FileTransfer file={file} />
         </div>
       )}
     </div>
