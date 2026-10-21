@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { CHUNK_SIZE, MAX_SIZE, MAX_BUFFER } from "../constants";
+import { sha256 } from "../utils/hash";
 
 function waitForBuffer(channel) {
   if (channel.bufferedAmount <= MAX_BUFFER) return Promise.resolve();
@@ -60,14 +61,17 @@ export function useFileTransfer(channelRef, addMessage) {
     const channel = channelRef.current;
     if (!file || !channel || channel.readyState !== "open") return;
 
-    channel.send(
-      JSON.stringify({
-        type: "file-meta",
-        name: file.name,
-        size: file.size,
-        mime: file.type,
-      }),
-    );
+        const hash = await sha256(file);
+
+        channel.send(
+          JSON.stringify({
+            type: "file-meta",
+            name: file.name,
+            size: file.size,
+            mime: file.type,
+            hash,
+          }),
+        );
 
     let offset = 0;
     let lastPercent = -1;
@@ -126,6 +130,23 @@ export function useFileTransfer(channelRef, addMessage) {
     }
   }
 
+    async function finishFile(meta) {
+      const blob = new Blob(meta.chunks, { type: meta.mime });
+      const url = URL.createObjectURL(blob);
+
+      // null = could not check, true = matches, false = does NOT match
+      let verified = null;
+      if (meta.hash) {
+        const actual = await sha256(blob);
+        if (actual !== null) verified = actual === meta.hash;
+      }
+
+      setReceived((r) => [
+        ...r,
+        { name: meta.name, size: meta.size, url, verified },
+      ]);
+    }
+
   function onIncomingChunk(data) {
     const meta = incomingRef.current;
     if (!meta) return; // we never agreed to receive this, so ignore it
@@ -140,11 +161,9 @@ export function useFileTransfer(channelRef, addMessage) {
     }
 
     if (meta.received >= meta.size) {
-      const blob = new Blob(meta.chunks, { type: meta.mime });
-      const url = URL.createObjectURL(blob);
-      setReceived((r) => [...r, { name: meta.name, size: meta.size, url }]);
       incomingRef.current = null;
       setReceiveProgress(null);
+      finishFile(meta);
     }
   }
 

@@ -37,10 +37,23 @@ export default function FileTransfer({ file }) {
       <ul>
         {file.received.map((f, i) => (
           <li key={i}>
-            <a href={f.url} download={f.name}>
-              {f.name}
-            </a>{" "}
-            ({formatSize(f.size)})
+            {f.verified === false ? (
+              <span>{f.name}</span>
+            ) : (
+              <a href={f.url} download={f.name}>
+                {f.name}
+              </a>
+            )}{" "}
+            ({formatSize(f.size)}){" "}
+            {f.verified === true && (
+              <span style={{ color: "limegreen" }}>✔ Verified</span>
+            )}
+            {f.verified === false && (
+              <span style={{ color: "red" }}>
+                ✘ File is corrupted, do not use it
+              </span>
+            )}
+            {f.verified === null && <span>(not verified)</span>}
           </li>
         ))}
       </ul>
