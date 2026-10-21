@@ -32,7 +32,7 @@ function makeCode() {
   return code;
 }
 
-const devices = new Map(); // socket id -> { id, name, room }
+const devices = new Map(); // socket id -> { id, name, room, device }
 
 function roomExists(code) {
   return [...devices.values()].some((d) => d.room === code);
@@ -65,8 +65,23 @@ function enterRoom(socket, code) {
 
 io.on("connection", (socket) => {
   const name = randomName();
-  devices.set(socket.id, { id: socket.id, name, room: null });
+  devices.set(socket.id, { id: socket.id, name, room: null, device: "" });
   socket.emit("welcome", { id: socket.id, name });
+
+  socket.on("set-profile", (profile) => {
+    const { name: newName, device } = profile || {};
+    const entry = devices.get(socket.id);
+    if (!entry) return;
+
+    const cleanName = String(newName || "")
+      .trim()
+      .slice(0, 20);
+    if (cleanName) entry.name = cleanName;
+    entry.device = String(device || "").slice(0, 40);
+
+    socket.emit("profile-saved", { name: entry.name, device: entry.device });
+    if (entry.room) sendDeviceList(entry.room);
+  });
 
   socket.on("create-room", () => {
     let code = makeCode();
@@ -88,12 +103,12 @@ io.on("connection", (socket) => {
     socket.emit("room-left");
   });
 
-    socket.on("signal", ({ to, data }) => {
-      const sender = devices.get(socket.id);
-      const target = devices.get(to);
-      if (!sender || !target || sender.room !== target.room) return;
-      io.to(to).emit("signal", { from: socket.id, data });
-    });
+  socket.on("signal", ({ to, data }) => {
+    const sender = devices.get(socket.id);
+    const target = devices.get(to);
+    if (!sender || !target || sender.room !== target.room) return;
+    io.to(to).emit("signal", { from: socket.id, data });
+  });
 
   socket.on("disconnect", () => {
     leaveRoom(socket);

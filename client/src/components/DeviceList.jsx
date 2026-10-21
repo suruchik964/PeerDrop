@@ -6,7 +6,8 @@ export default function DeviceList({ others, onConnect, peerStatus }) {
       <ul>
         {others.map((d) => (
           <li key={d.id}>
-            {d.name} <button onClick={() => onConnect(d.id)}>Connect</button>
+            {d.name} {d.device && <small>({d.device})</small>}{" "}
+            <button onClick={() => onConnect(d.id)}>Connect</button>
           </li>
         ))}
       </ul>

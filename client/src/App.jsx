@@ -7,6 +7,7 @@ import RoomPanel from "./components/RoomPanel";
 import DeviceList from "./components/DeviceList";
 import ChatBox from "./components/ChatBox";
 import FileTransfer from "./components/FileTransfer";
+import NameBox from "./components/NameBox";
 
 function App() {
   const channelRef = useRef(null); // the direct pipe, shared by the hooks below
@@ -35,11 +36,7 @@ function App() {
   return (
     <div style={{ padding: 24, fontFamily: "sans-serif" }}>
       <h1>PeerDrop</h1>
-      <p>
-        {roomState.me
-          ? `You are ${roomState.me.name}`
-          : "Connecting to server..."}
-      </p>
+      <NameBox me={roomState.me} onSave={roomState.setMyName} />
 
       {!roomState.room ? (
         <RoomPanel
