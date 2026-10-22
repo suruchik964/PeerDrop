@@ -15,36 +15,59 @@ function waitForBuffer(channel) {
   });
 }
 
-export function useFileTransfer(channelRef, addMessage) {
+export function useFileTransfer(channelRef) {
+  const [sent, setSent] = useState([]);
   const [received, setReceived] = useState([]);
   const [sendProgress, setSendProgress] = useState(null);
   const [receiveProgress, setReceiveProgress] = useState(null);
   const [incomingOffer, setIncomingOffer] = useState(null);
-  const incomingRef = useRef(null);
-  const pendingFileRef = useRef(null);
+  const [notice, setNotice] = useState("");
+
+  const incomingRef = useRef(null); // the file that is arriving right now
+  const pendingRef = useRef(null); // the file we offered and are waiting on
+  const acceptedRef = useRef(false); // did WE click Accept?
+
+  function updateSent(id, changes) {
+    setSent((list) =>
+      list.map((s) => (s.id === id ? { ...s, ...changes } : s)),
+    );
+  }
 
   // ---------- sending ----------
 
-  function sendFile(e) {
-    const file = e.target.files[0];
+  function sendFile(file) {
     const channel = channelRef.current;
-    e.target.value = "";
-    if (!file || !channel || channel.readyState !== "open") return;
+    if (!file) return;
 
-    if (pendingFileRef.current) {
-      alert("Please wait for the current file to finish.");
+    if (!channel || channel.readyState !== "open") {
+      setNotice("Not connected to the other device yet.");
+      return;
+    }
+    if (pendingRef.current) {
+      setNotice("Please wait for the current file to finish.");
       return;
     }
     if (file.size === 0) {
-      alert("This file is empty.");
+      setNotice("This file is empty.");
       return;
     }
     if (file.size > MAX_SIZE) {
-      alert("For now, choose a file under 300 MB.");
+      setNotice("For now, choose a file under 300 MB.");
       return;
     }
 
-    pendingFileRef.current = file;
+    setNotice("");
+    const id = Date.now() + Math.random();
+    pendingRef.current = { file, id };
+    setSent((list) => [
+      {
+        id,
+        name: file.name,
+        size: file.size,
+        status: "Waiting for them to accept",
+      },
+      ...list,
+    ]);
     channel.send(
       JSON.stringify({
         type: "file-offer",
@@ -53,37 +76,45 @@ export function useFileTransfer(channelRef, addMessage) {
         mime: file.type,
       }),
     );
-    addMessage("me", `Waiting for them to accept: ${file.name}`);
   }
 
   async function startSending() {
-    const file = pendingFileRef.current;
+    const pending = pendingRef.current;
     const channel = channelRef.current;
-    if (!file || !channel || channel.readyState !== "open") return;
+    if (!pending || !channel || channel.readyState !== "open") return;
+    const { file, id } = pending;
 
-        const hash = await sha256(file);
+    function fail(message) {
+      updateSent(id, { status: "Failed" });
+      setNotice(message);
+      setSendProgress(null);
+      pendingRef.current = null;
+    }
 
-        channel.send(
-          JSON.stringify({
-            type: "file-meta",
-            name: file.name,
-            size: file.size,
-            mime: file.type,
-            hash,
-          }),
-        );
+    updateSent(id, { status: "Preparing" });
+    const hash = await sha256(file);
+    if (channel.readyState !== "open")
+      return fail("Connection closed before sending.");
+
+    updateSent(id, { status: "Sending" });
+    channel.send(
+      JSON.stringify({
+        type: "file-meta",
+        name: file.name,
+        size: file.size,
+        mime: file.type,
+        hash,
+      }),
+    );
 
     let offset = 0;
     let lastPercent = -1;
     setSendProgress(0);
     while (offset < file.size) {
       await waitForBuffer(channel);
-      if (channel.readyState !== "open") {
-        alert("Connection closed during the transfer.");
-        setSendProgress(null);
-        pendingFileRef.current = null;
-        return;
-      }
+      if (channel.readyState !== "open")
+        return fail("Connection closed during the transfer.");
+
       const piece = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
       channel.send(piece);
       offset += piece.byteLength;
@@ -96,8 +127,8 @@ export function useFileTransfer(channelRef, addMessage) {
     }
 
     setSendProgress(null);
-    pendingFileRef.current = null;
-    addMessage("me", `Sent file: ${file.name}`);
+    pendingRef.current = null;
+    updateSent(id, { status: "Sent" });
   }
 
   // ---------- receiving ----------
@@ -105,6 +136,7 @@ export function useFileTransfer(channelRef, addMessage) {
   function respondToOffer(accepted) {
     const channel = channelRef.current;
     if (!channel || channel.readyState !== "open") return;
+    acceptedRef.current = accepted;
     channel.send(
       JSON.stringify({ type: accepted ? "file-accept" : "file-decline" }),
     );
@@ -117,9 +149,13 @@ export function useFileTransfer(channelRef, addMessage) {
     } else if (msg.type === "file-accept") {
       startSending();
     } else if (msg.type === "file-decline") {
-      pendingFileRef.current = null;
-      addMessage("them", "Declined your file.");
+      if (pendingRef.current) {
+        updateSent(pendingRef.current.id, { status: "Declined" });
+        pendingRef.current = null;
+      }
     } else if (msg.type === "file-meta") {
+      if (!acceptedRef.current) return; // we never said yes, so ignore it
+      acceptedRef.current = false;
       incomingRef.current = {
         ...msg,
         chunks: [],
@@ -130,26 +166,25 @@ export function useFileTransfer(channelRef, addMessage) {
     }
   }
 
-    async function finishFile(meta) {
-      const blob = new Blob(meta.chunks, { type: meta.mime });
-      const url = URL.createObjectURL(blob);
+  async function finishFile(meta) {
+    const blob = new Blob(meta.chunks, { type: meta.mime });
+    const url = URL.createObjectURL(blob);
 
-      // null = could not check, true = matches, false = does NOT match
-      let verified = null;
-      if (meta.hash) {
-        const actual = await sha256(blob);
-        if (actual !== null) verified = actual === meta.hash;
-      }
-
-      setReceived((r) => [
-        ...r,
-        { name: meta.name, size: meta.size, url, verified },
-      ]);
+    let verified = null; // null = could not check, true = matches, false = does NOT match
+    if (meta.hash) {
+      const actual = await sha256(blob);
+      if (actual !== null) verified = actual === meta.hash;
     }
+
+    setReceived((r) => [
+      { name: meta.name, size: meta.size, url, verified },
+      ...r,
+    ]);
+  }
 
   function onIncomingChunk(data) {
     const meta = incomingRef.current;
-    if (!meta) return; // we never agreed to receive this, so ignore it
+    if (!meta) return;
 
     meta.chunks.push(data);
     meta.received += data.byteLength;
@@ -167,14 +202,37 @@ export function useFileTransfer(channelRef, addMessage) {
     }
   }
 
+  // Called when the other device leaves: clear anything half-finished
+  function reset() {
+    pendingRef.current = null;
+    incomingRef.current = null;
+    acceptedRef.current = false;
+    setIncomingOffer(null);
+    setSendProgress(null);
+    setReceiveProgress(null);
+    setNotice("");
+    setSent((list) =>
+      list.map((s) =>
+        ["Waiting for them to accept", "Preparing", "Sending"].includes(
+          s.status,
+        )
+          ? { ...s, status: "Failed" }
+          : s,
+      ),
+    );
+  }
+
   return {
+    sent,
     received,
     sendProgress,
     receiveProgress,
     incomingOffer,
+    notice,
     sendFile,
     respondToOffer,
     onIncomingText,
     onIncomingChunk,
+    reset,
   };
 }

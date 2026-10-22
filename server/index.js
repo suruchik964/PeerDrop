@@ -95,6 +95,14 @@ io.on("connection", (socket) => {
       socket.emit("room-error", "Room not found. Check the code.");
       return;
     }
+
+    // NEW: allow only 2 devices per room
+    const count = [...devices.values()].filter((d) => d.room === code).length;
+    if (count >= 2) {
+      socket.emit("room-error", "This room is full (2 devices max).");
+      return;
+    }
+
     enterRoom(socket, code);
   });
 

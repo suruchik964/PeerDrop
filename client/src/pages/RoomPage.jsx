@@ -1,61 +1,144 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { Navigate, useParams } from "react-router-dom";
-import { useChat } from "../hooks/useChat";
+import { socket } from "../socket";
 import { useFileTransfer } from "../hooks/useFileTransfer";
 import { usePeerConnection } from "../hooks/usePeerConnection";
-import DeviceList from "../components/DeviceList";
-import ChatBox from "../components/ChatBox";
-import FileTransfer from "../components/FileTransfer";
+import RoomHeader from "../components/RoomHeader";
+import PeerBanner from "../components/PeerBanner";
+import SendPanel from "../components/SendPanel";
+import FilesPanel from "../components/FilesPanel";
+import Modal from "../components/Modal";
+import { formatSize } from "../utils/formatSize";
 
 export default function RoomPage({ roomState }) {
   const { code } = useParams(); // the code from the address bar
   const channelRef = useRef(null);
+  const startedRef = useRef(null); // whom we already started a connection to
+  const pairedRef = useRef(null); // whom we are paired with in this room
 
-  const chat = useChat(channelRef);
-  const file = useFileTransfer(channelRef, chat.addMessage);
+  const file = useFileTransfer(channelRef);
 
+  const me = roomState.me;
+  const other = roomState.others[0]; // rooms have 2 devices at most
+
+  // Everything arriving through the direct pipe lands here first
   function handleMessage(e) {
     if (typeof e.data === "string") {
-      const msg = JSON.parse(e.data);
-      if (msg.type === "chat") chat.onIncoming(msg);
-      else file.onIncomingText(msg);
+      try {
+        file.onIncomingText(JSON.parse(e.data));
+      } catch {
+        // ignore anything that is not valid
+      }
     } else {
       file.onIncomingChunk(e.data);
     }
   }
 
-  const { peerStatus, connectTo } = usePeerConnection(
+  // The other device told us its page is open and listening
+  function handleReady(from) {
+    if (!me || !other || from !== other.id) return;
+
+    if (me.id < from) {
+      // We are the one who starts the connection (smaller id), once per device
+      if (startedRef.current !== from) {
+        startedRef.current = from;
+        connectTo(from);
+      }
+    } else {
+      // We wait for their request, but let them know we are here too
+      socket.emit("signal", { to: from, data: { ready: true } });
+    }
+  }
+
+  const { peerStatus, connectTo, disconnect } = usePeerConnection(
     channelRef,
     handleMessage,
+    handleReady,
   );
+
+  // Tell the other device "I'm here", and clean up when they leave
+  useEffect(() => {
+    if (!other) {
+      if (pairedRef.current) {
+        pairedRef.current = null;
+        startedRef.current = null;
+        disconnect();
+        file.reset();
+      }
+      return;
+    }
+    if (!me) return;
+
+    // A different device took their place: drop the old connection
+    if (pairedRef.current && pairedRef.current !== other.id) {
+      startedRef.current = null;
+      disconnect();
+      file.reset();
+    }
+
+    pairedRef.current = other.id;
+    socket.emit("signal", { to: other.id, data: { ready: true } });
+  }, [other?.id, me?.id]);
+
+  // Close the connection when leaving this page
+  useEffect(() => {
+    return () => {
+      startedRef.current = null;
+      pairedRef.current = null;
+      disconnect();
+    };
+  }, []);
 
   // Not in this room (reload, Leave button, wrong address)? Go back to the landing page
   if (roomState.room !== code) return <Navigate to="/" replace />;
 
+  const connected = peerStatus === "Connected directly!";
+
   return (
-    <div style={{ padding: 24, fontFamily: "sans-serif" }}>
-      <header>
-        <b style={{ fontSize: 22 }}>PeerDrop</b>
-      </header>
+    <div className="min-h-screen">
+      <RoomHeader room={roomState.room} onLeave={roomState.leaveRoom} />
 
-      <p>
-        You are <b>{roomState.me?.name}</b>
-      </p>
-      <h2>Room code: {roomState.room}</h2>
-      <button onClick={roomState.leaveRoom}>Leave room</button>
+      <main className="mx-auto max-w-5xl space-y-4 px-4 py-6">
+        <PeerBanner other={other} peerStatus={peerStatus} />
 
-      <DeviceList
-        others={roomState.others}
-        onConnect={connectTo}
-        peerStatus={peerStatus}
-      />
-      <FileTransfer file={file} />
-      <ChatBox
-        messages={chat.messages}
-        text={chat.text}
-        setText={chat.setText}
-        onSend={chat.sendMessage}
-      />
+        <div className="grid gap-4 md:grid-cols-2">
+          <SendPanel
+            connected={connected}
+            onSend={file.sendFile}
+            progress={file.sendProgress}
+            notice={file.notice}
+          />
+          <FilesPanel file={file} />
+        </div>
+      </main>
+
+      {file.incomingOffer && (
+        <Modal title="Incoming file" closable={false}>
+          <p className="text-sm text-slate-400">
+            {other ? other.name : "Someone"} wants to send you
+          </p>
+          <p className="mt-2 break-all text-lg font-semibold">
+            {file.incomingOffer.name}
+          </p>
+          <p className="text-sm text-slate-400">
+            {formatSize(file.incomingOffer.size)}
+          </p>
+          <div className="mt-5 flex gap-2">
+            <button
+              onClick={() => file.respondToOffer(false)}
+              className="flex-1 rounded-lg bg-slate-700 px-4 py-2 font-medium hover:bg-slate-600"
+            >
+              Decline
+            </button>
+            <button
+              onClick={() => file.respondToOffer(true)}
+              className="flex-1 rounded-lg bg-green-600 px-4 py-2 font-medium hover:bg-green-500"
+            >
+              Accept
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

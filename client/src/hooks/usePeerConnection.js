@@ -2,15 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { socket } from "../socket";
 import { ICE_CONFIG, LOW_BUFFER } from "../constants";
 
-export function usePeerConnection(channelRef, onMessage) {
+export function usePeerConnection(channelRef, onMessage, onReady) {
   const [peerStatus, setPeerStatus] = useState("Not connected");
   const peerRef = useRef(null);
   const pendingRef = useRef([]);
   const onMessageRef = useRef(onMessage);
+  const onReadyRef = useRef(onReady);
 
-  // Always remember the newest version of the message handler
+  // Always remember the newest versions of the handlers
   useEffect(() => {
     onMessageRef.current = onMessage;
+    onReadyRef.current = onReady;
   });
 
   function createPeer(targetId) {
@@ -51,46 +53,81 @@ export function usePeerConnection(channelRef, onMessage) {
     pendingRef.current = [];
   }
 
+  // The device that starts the connection
   async function connectTo(targetId) {
     setPeerStatus("Connecting...");
     const pc = createPeer(targetId);
     setupChannel(pc.createDataChannel("files"));
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    socket.emit("signal", {
-      to: targetId,
-      data: { description: pc.localDescription },
-    });
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit("signal", {
+        to: targetId,
+        data: { description: pc.localDescription },
+      });
+    } catch (err) {
+      if (peerRef.current !== pc) return; // an old attempt that was closed, ignore it
+      console.error("Could not start connection:", err);
+      setPeerStatus("Connection failed");
+    }
+  }
+
+  // Close the current connection and reset
+  function disconnect() {
+    const channel = channelRef.current;
+    if (channel) {
+      channel.onopen = null;
+      channel.onclose = null;
+      channel.onmessage = null;
+    }
+    if (peerRef.current) {
+      peerRef.current.onconnectionstatechange = null;
+      peerRef.current.close();
+      peerRef.current = null;
+    }
+    channelRef.current = null;
+    pendingRef.current = [];
+    setPeerStatus("Not connected");
   }
 
   useEffect(() => {
     socket.on("signal", async ({ from, data }) => {
-      if (data.description) {
-        if (data.description.type === "offer") {
-          setPeerStatus("Connecting...");
-          const pc = createPeer(from);
-          pc.ondatachannel = (e) => setupChannel(e.channel);
-          await pc.setRemoteDescription(data.description);
-          await flushCandidates();
+      try {
+        // NEW: the other page says "I'm here and listening"
+        if (data.ready) {
+          if (onReadyRef.current) onReadyRef.current(from);
+          return;
+        }
 
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          socket.emit("signal", {
-            to: from,
-            data: { description: pc.localDescription },
-          });
-        } else {
-          await peerRef.current.setRemoteDescription(data.description);
-          await flushCandidates();
+        if (data.description) {
+          if (data.description.type === "offer") {
+            setPeerStatus("Connecting...");
+            const pc = createPeer(from);
+            pc.ondatachannel = (e) => setupChannel(e.channel);
+            await pc.setRemoteDescription(data.description);
+            await flushCandidates();
+
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socket.emit("signal", {
+              to: from,
+              data: { description: pc.localDescription },
+            });
+          } else if (peerRef.current) {
+            await peerRef.current.setRemoteDescription(data.description);
+            await flushCandidates();
+          }
+        } else if (data.candidate) {
+          const pc = peerRef.current;
+          if (pc && pc.remoteDescription) {
+            await pc.addIceCandidate(data.candidate);
+          } else {
+            pendingRef.current.push(data.candidate);
+          }
         }
-      } else if (data.candidate) {
-        const pc = peerRef.current;
-        if (pc && pc.remoteDescription) {
-          await pc.addIceCandidate(data.candidate);
-        } else {
-          pendingRef.current.push(data.candidate);
-        }
+      } catch (err) {
+        console.error("Signal handling failed:", err);
       }
     });
 
@@ -99,5 +136,5 @@ export function usePeerConnection(channelRef, onMessage) {
     };
   }, []);
 
-  return { peerStatus, connectTo };
+  return { peerStatus, connectTo, disconnect };
 }
