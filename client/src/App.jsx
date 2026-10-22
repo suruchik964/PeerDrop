@@ -1,69 +1,17 @@
-import { useRef } from "react";
+import { Routes, Route, Navigate } from "react-router-dom";
 import { useRoom } from "./hooks/useRoom";
-import { useChat } from "./hooks/useChat";
-import { useFileTransfer } from "./hooks/useFileTransfer";
-import { usePeerConnection } from "./hooks/usePeerConnection";
-import RoomPanel from "./components/RoomPanel";
-import DeviceList from "./components/DeviceList";
-import ChatBox from "./components/ChatBox";
-import FileTransfer from "./components/FileTransfer";
-import NameBox from "./components/NameBox";
+import Landing from "./pages/Landing";
+import RoomPage from "./pages/RoomPage";
 
 function App() {
-  const channelRef = useRef(null); // the direct pipe, shared by the hooks below
-
-  const roomState = useRoom();
-  const chat = useChat(channelRef);
-  const file = useFileTransfer(channelRef, chat.addMessage);
-
-  // Everything that arrives through the pipe comes here first,
-  // and gets handed to the right hook
-  function handleMessage(e) {
-    if (typeof e.data === "string") {
-      const msg = JSON.parse(e.data);
-      if (msg.type === "chat") chat.onIncoming(msg);
-      else file.onIncomingText(msg);
-    } else {
-      file.onIncomingChunk(e.data);
-    }
-  }
-
-  const { peerStatus, connectTo } = usePeerConnection(
-    channelRef,
-    handleMessage,
-  );
+  const roomState = useRoom(); // kept here so it survives page changes
 
   return (
-    <div style={{ padding: 24, fontFamily: "sans-serif" }}>
-      <h1>PeerDrop</h1>
-      <NameBox me={roomState.me} onSave={roomState.setMyName} />
-
-      {!roomState.room ? (
-        <RoomPanel
-          onCreate={roomState.createRoom}
-          onJoin={roomState.joinRoom}
-          error={roomState.error}
-        />
-      ) : (
-        <div>
-          <h2>Room code: {roomState.room}</h2>
-          <button onClick={roomState.leaveRoom}>Leave room</button>
-
-          <DeviceList
-            others={roomState.others}
-            onConnect={connectTo}
-            peerStatus={peerStatus}
-          />
-          <ChatBox
-            messages={chat.messages}
-            text={chat.text}
-            setText={chat.setText}
-            onSend={chat.sendMessage}
-          />
-          <FileTransfer file={file} />
-        </div>
-      )}
-    </div>
+    <Routes>
+      <Route path="/" element={<Landing roomState={roomState} />} />
+      <Route path="/room/:code" element={<RoomPage roomState={roomState} />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
 
