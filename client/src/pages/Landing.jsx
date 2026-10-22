@@ -1,13 +1,30 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import Logo from "../components/Logo";
 import NameBox from "../components/NameBox";
 import Modal from "../components/Modal";
 
 const features = [
-  "Direct device-to-device transfer. Files never touch a server.",
-  "No signup and no install. It runs in the browser.",
-  "Every file is verified, so you know it arrived intact.",
-  "Works across different networks using a room code.",
+  {
+    icon: "⚡",
+    title: "Direct transfer",
+    text: "Files go straight from device to device. Nothing is uploaded to a server.",
+  },
+  {
+    icon: "🔓",
+    title: "No signup",
+    text: "Open the page, share a code, and send. No account and no install.",
+  },
+  {
+    icon: "✅",
+    title: "Verified files",
+    text: "Every file is checked with a fingerprint (SHA-256), so you know it arrived intact.",
+  },
+  {
+    icon: "🌐",
+    title: "Works anywhere",
+    text: "A room code connects devices even when they are on different networks.",
+  },
 ];
 
 export default function Landing({ roomState }) {
@@ -24,7 +41,7 @@ export default function Landing({ roomState }) {
   }, [roomState.room, modal]);
 
   function openCreate() {
-    roomState.createRoom(); // the server creates the room and sends the code back
+    roomState.createRoom();
     setModal("create");
   }
 
@@ -34,7 +51,7 @@ export default function Landing({ roomState }) {
   }
 
   function closeModal() {
-    if (roomState.room) roomState.leaveRoom(); // don't leave a stray room behind
+    if (roomState.room) roomState.leaveRoom();
     setModal(null);
   }
 
@@ -54,56 +71,86 @@ export default function Landing({ roomState }) {
   }
 
   return (
-    <div style={{ padding: 24, fontFamily: "sans-serif" }}>
-      <header>
-        <b style={{ fontSize: 22 }}>PeerDrop</b>
+    <div className="min-h-screen">
+      <header className="px-6 py-4">
+        <Logo />
       </header>
 
-      <main style={{ maxWidth: 480, margin: "40px auto" }}>
-        <h1>Send files directly between devices</h1>
-        <p>
-          No uploads, no accounts. The file goes straight from one device to the
-          other.
+      <main className="mx-auto max-w-xl px-4 pb-16 pt-10 text-center">
+        <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">
+          Send files <span className="text-indigo-400">directly</span> between
+          devices
+        </h1>
+        <p className="mt-4 text-slate-400">
+          No uploads and no accounts. The file goes straight from one device to
+          the other.
         </p>
 
-        <NameBox me={roomState.me} onSave={roomState.setMyName} />
-
-        <div style={{ marginTop: 16 }}>
-          <button onClick={openCreate}>Create a room</button>{" "}
-          <button onClick={openJoin}>Join a room</button>
+        <div className="mt-8">
+          <NameBox me={roomState.me} onSave={roomState.setMyName} />
         </div>
 
-        <h2 style={{ marginTop: 40 }}>Features</h2>
-        <ul>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+          <button
+            onClick={openCreate}
+            className="flex-1 rounded-xl bg-indigo-600 px-6 py-3 font-semibold hover:bg-indigo-500"
+          >
+            Create a room
+          </button>
+          <button
+            onClick={openJoin}
+            className="flex-1 rounded-xl border border-slate-700 px-6 py-3 font-semibold hover:bg-slate-800"
+          >
+            Join a room
+          </button>
+        </div>
+
+        <h2 className="mb-4 mt-16 text-left text-xl font-semibold">Features</h2>
+        <div className="grid gap-3 text-left sm:grid-cols-2">
           {features.map((f) => (
-            <li key={f}>{f}</li>
+            <div
+              key={f.title}
+              className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4"
+            >
+              <p className="text-2xl">{f.icon}</p>
+              <p className="mt-2 font-semibold">{f.title}</p>
+              <p className="mt-1 text-sm text-slate-400">{f.text}</p>
+            </div>
           ))}
-        </ul>
+        </div>
+
+        <p className="mt-12 text-xs text-slate-600">
+          Built with WebRTC, Socket.io and React
+        </p>
       </main>
 
       {modal === "create" && (
         <Modal title="Your room is ready" onClose={closeModal}>
           {roomState.room ? (
             <div>
-              <p>Share this code with the other person:</p>
-              <p
-                style={{
-                  fontSize: 28,
-                  letterSpacing: 4,
-                  fontFamily: "monospace",
-                }}
-              >
+              <p className="text-sm text-slate-400">
+                Share this code with the other person:
+              </p>
+              <p className="my-4 text-center font-mono text-4xl font-bold tracking-widest">
                 {roomState.room}
               </p>
-              <button onClick={copyCode}>
-                {copied ? "Copied!" : "Copy code"}
-              </button>{" "}
-              <button onClick={() => navigate(`/room/${roomState.room}`)}>
-                Enter room
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={copyCode}
+                  className="flex-1 rounded-lg bg-slate-700 px-4 py-2 font-medium hover:bg-slate-600"
+                >
+                  {copied ? "Copied!" : "Copy code"}
+                </button>
+                <button
+                  onClick={() => navigate(`/room/${roomState.room}`)}
+                  className="flex-1 rounded-lg bg-indigo-600 px-4 py-2 font-medium hover:bg-indigo-500"
+                >
+                  Enter room
+                </button>
+              </div>
             </div>
           ) : (
-            <p>Creating room...</p>
+            <p className="text-slate-400">Creating room...</p>
           )}
         </Modal>
       )}
@@ -114,13 +161,21 @@ export default function Landing({ roomState }) {
             <input
               value={codeInput}
               onChange={(e) => setCodeInput(e.target.value.toUpperCase())}
-              placeholder="Enter room code"
+              placeholder="ENTER CODE"
               maxLength={5}
               autoFocus
-            />{" "}
-            <button type="submit">Enter room</button>
+              className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-3 text-center font-mono text-2xl tracking-widest outline-none focus:border-indigo-500"
+            />
+            {roomState.error && (
+              <p className="mt-2 text-sm text-red-400">{roomState.error}</p>
+            )}
+            <button
+              type="submit"
+              className="mt-4 w-full rounded-lg bg-indigo-600 px-4 py-2 font-medium hover:bg-indigo-500"
+            >
+              Enter room
+            </button>
           </form>
-          {roomState.error && <p style={{ color: "red" }}>{roomState.error}</p>}
         </Modal>
       )}
     </div>
