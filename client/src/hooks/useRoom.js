@@ -7,10 +7,18 @@ export function useRoom() {
   const [room, setRoom] = useState(null);
   const [devices, setDevices] = useState([]);
   const [error, setError] = useState("");
+  const [ready, setReady] = useState(false); // has the server told us the situation yet?
+  const [serverOnline, setServerOnline] = useState(socket.connected);
 
   useEffect(() => {
+    socket.on("connect", () => setServerOnline(true));
+    socket.on("disconnect", () => setServerOnline(false));
+
     socket.on("welcome", (info) => {
-      setMe(info);
+      setMe({ id: info.id, name: info.name, device: info.device });
+      setRoom(info.room || null); // restored after a reload
+      if (!info.room) setDevices([]);
+      setReady(true);
 
       // If this browser saved a name earlier, tell the server about it
       let saved = "";
@@ -38,6 +46,8 @@ export function useRoom() {
     socket.on("device-list", (list) => setDevices(list));
 
     return () => {
+      socket.off("connect");
+      socket.off("disconnect");
       socket.off("welcome");
       socket.off("profile-saved");
       socket.off("room-joined");
@@ -65,6 +75,8 @@ export function useRoom() {
     room,
     others,
     error,
+    ready,
+    serverOnline,
     setMyName,
     createRoom: () => socket.emit("create-room"),
     joinRoom: (code) => socket.emit("join-room", code),

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import Logo from "../components/Logo";
 import NameBox from "../components/NameBox";
 import Modal from "../components/Modal";
+import ServerBanner from "../components/ServerBanner";
 
 const features = [
   {
@@ -40,6 +41,12 @@ export default function Landing({ roomState }) {
     }
   }, [roomState.room, modal]);
 
+  // Landed here while still in a room (back button, reload)? Leave it, so no hidden room stays open
+  useEffect(() => {
+    if (roomState.ready && roomState.room && modal === null)
+      roomState.leaveRoom();
+  }, [roomState.ready]);
+
   function openCreate() {
     roomState.createRoom();
     setModal("create");
@@ -72,6 +79,7 @@ export default function Landing({ roomState }) {
 
   return (
     <div className="min-h-screen">
+      <ServerBanner online={roomState.serverOnline} />
       <header className="px-6 py-4">
         <Logo />
       </header>

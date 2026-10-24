@@ -15,6 +15,8 @@ function waitForBuffer(channel) {
   });
 }
 
+const BUSY_STATUSES = ["Waiting for them to accept", "Preparing", "Sending"];
+
 export function useFileTransfer(channelRef) {
   const [sent, setSent] = useState([]);
   const [received, setReceived] = useState([]);
@@ -24,13 +26,19 @@ export function useFileTransfer(channelRef) {
   const [notice, setNotice] = useState("");
 
   const incomingRef = useRef(null); // the file that is arriving right now
-  const pendingRef = useRef(null); // the file we offered and are waiting on
+  const pendingRef = useRef(null); // the file we offered: { file, id, token }
   const acceptedRef = useRef(false); // did WE click Accept?
 
   function updateSent(id, changes) {
     setSent((list) =>
       list.map((s) => (s.id === id ? { ...s, ...changes } : s)),
     );
+  }
+
+  function sendToPeer(message) {
+    const channel = channelRef.current;
+    if (channel && channel.readyState === "open")
+      channel.send(JSON.stringify(message));
   }
 
   // ---------- sending ----------
@@ -58,7 +66,8 @@ export function useFileTransfer(channelRef) {
 
     setNotice("");
     const id = Date.now() + Math.random();
-    pendingRef.current = { file, id };
+    // The token lets us stop the sending loop from outside
+    pendingRef.current = { file, id, token: { cancelled: false } };
     setSent((list) => [
       {
         id,
@@ -68,33 +77,35 @@ export function useFileTransfer(channelRef) {
       },
       ...list,
     ]);
-    channel.send(
-      JSON.stringify({
-        type: "file-offer",
-        name: file.name,
-        size: file.size,
-        mime: file.type,
-      }),
-    );
+    sendToPeer({
+      type: "file-offer",
+      name: file.name,
+      size: file.size,
+      mime: file.type,
+    });
   }
 
   async function startSending() {
     const pending = pendingRef.current;
     const channel = channelRef.current;
     if (!pending || !channel || channel.readyState !== "open") return;
-    const { file, id } = pending;
+    const { file, id, token } = pending;
 
-    function fail(message) {
-      updateSent(id, { status: "Failed" });
-      setNotice(message);
+    // Stop and tidy up (only touches pendingRef if it is still this file)
+    function finishUp(status, message) {
+      if (status) updateSent(id, { status });
+      if (message) setNotice(message);
       setSendProgress(null);
-      pendingRef.current = null;
+      if (pendingRef.current && pendingRef.current.id === id)
+        pendingRef.current = null;
     }
 
     updateSent(id, { status: "Preparing" });
     const hash = await sha256(file);
-    if (channel.readyState !== "open")
-      return fail("Connection closed before sending.");
+    if (token.cancelled) return finishUp();
+    if (channel.readyState !== "open") {
+      return finishUp("Failed", "Connection closed before sending.");
+    }
 
     updateSent(id, { status: "Sending" });
     channel.send(
@@ -112,10 +123,13 @@ export function useFileTransfer(channelRef) {
     setSendProgress(0);
     while (offset < file.size) {
       await waitForBuffer(channel);
-      if (channel.readyState !== "open")
-        return fail("Connection closed during the transfer.");
+      if (token.cancelled) return finishUp();
+      if (channel.readyState !== "open") {
+        return finishUp("Failed", "Connection closed during the transfer.");
+      }
 
       const piece = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
+      if (token.cancelled) return finishUp();
       channel.send(piece);
       offset += piece.byteLength;
 
@@ -126,9 +140,23 @@ export function useFileTransfer(channelRef) {
       }
     }
 
-    setSendProgress(null);
+    finishUp("Sent");
+  }
+
+  // Stop our own sending (we clicked cancel, or the other side did)
+  function abortSending(message) {
+    const pending = pendingRef.current;
+    if (!pending) return;
+    pending.token.cancelled = true;
+    updateSent(pending.id, { status: "Cancelled" });
     pendingRef.current = null;
-    updateSent(id, { status: "Sent" });
+    setSendProgress(null);
+    setNotice(message);
+  }
+
+  function cancelSending() {
+    sendToPeer({ type: "file-cancel", role: "sender" });
+    abortSending("You cancelled the transfer.");
   }
 
   // ---------- receiving ----------
@@ -143,6 +171,20 @@ export function useFileTransfer(channelRef) {
     setIncomingOffer(null);
   }
 
+  // Stop our own receiving (we clicked cancel, or the sender did)
+  function abortReceiving(message) {
+    incomingRef.current = null;
+    acceptedRef.current = false;
+    setIncomingOffer(null);
+    setReceiveProgress(null);
+    setNotice(message);
+  }
+
+  function cancelReceiving() {
+    sendToPeer({ type: "file-cancel", role: "receiver" });
+    abortReceiving("You cancelled the transfer.");
+  }
+
   function onIncomingText(msg) {
     if (msg.type === "file-offer") {
       setIncomingOffer(msg);
@@ -153,6 +195,11 @@ export function useFileTransfer(channelRef) {
         updateSent(pendingRef.current.id, { status: "Declined" });
         pendingRef.current = null;
       }
+    } else if (msg.type === "file-cancel") {
+      // role tells us who cancelled: the sender stopped, or the receiver stopped
+      if (msg.role === "sender")
+        abortReceiving("The other device cancelled the file.");
+      else abortSending("The other device cancelled the transfer.");
     } else if (msg.type === "file-meta") {
       if (!acceptedRef.current) return; // we never said yes, so ignore it
       acceptedRef.current = false;
@@ -204,6 +251,7 @@ export function useFileTransfer(channelRef) {
 
   // Called when the other device leaves: clear anything half-finished
   function reset() {
+    if (pendingRef.current) pendingRef.current.token.cancelled = true;
     pendingRef.current = null;
     incomingRef.current = null;
     acceptedRef.current = false;
@@ -213,14 +261,12 @@ export function useFileTransfer(channelRef) {
     setNotice("");
     setSent((list) =>
       list.map((s) =>
-        ["Waiting for them to accept", "Preparing", "Sending"].includes(
-          s.status,
-        )
-          ? { ...s, status: "Failed" }
-          : s,
+        BUSY_STATUSES.includes(s.status) ? { ...s, status: "Failed" } : s,
       ),
     );
   }
+
+  const sendBusy = sent.some((s) => BUSY_STATUSES.includes(s.status));
 
   return {
     sent,
@@ -229,7 +275,10 @@ export function useFileTransfer(channelRef) {
     receiveProgress,
     incomingOffer,
     notice,
+    sendBusy,
     sendFile,
+    cancelSending,
+    cancelReceiving,
     respondToOffer,
     onIncomingText,
     onIncomingChunk,

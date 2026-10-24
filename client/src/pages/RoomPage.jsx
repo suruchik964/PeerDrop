@@ -3,6 +3,7 @@ import { Navigate, useParams } from "react-router-dom";
 import { socket } from "../socket";
 import { useFileTransfer } from "../hooks/useFileTransfer";
 import { usePeerConnection } from "../hooks/usePeerConnection";
+import ServerBanner from "../components/ServerBanner";
 import RoomHeader from "../components/RoomHeader";
 import PeerBanner from "../components/PeerBanner";
 import SendPanel from "../components/SendPanel";
@@ -15,6 +16,7 @@ export default function RoomPage({ roomState }) {
   const channelRef = useRef(null);
   const startedRef = useRef(null); // whom we already started a connection to
   const pairedRef = useRef(null); // whom we are paired with in this room
+  const myIdRef = useRef(null); // our own id, to notice when it changes
 
   const file = useFileTransfer(channelRef);
 
@@ -58,6 +60,15 @@ export default function RoomPage({ roomState }) {
 
   // Tell the other device "I'm here", and clean up when they leave
   useEffect(() => {
+    // Our own link to the server was replaced (it dropped and came back): start over
+    if (me && myIdRef.current && myIdRef.current !== me.id) {
+      startedRef.current = null;
+      pairedRef.current = null;
+      disconnect();
+      file.reset();
+    }
+    if (me) myIdRef.current = me.id;
+
     if (!other) {
       if (pairedRef.current) {
         pairedRef.current = null;
@@ -89,14 +100,42 @@ export default function RoomPage({ roomState }) {
     };
   }, []);
 
-  // Not in this room (reload, Leave button, wrong address)? Go back to the landing page
+  // Warn before closing or reloading the tab in the middle of a transfer
+  const transferring =
+    file.sendProgress !== null || file.receiveProgress !== null;
+  useEffect(() => {
+    if (!transferring) return;
+    const warn = (e) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [transferring]);
+
+  function handleLeave() {
+    if (
+      transferring &&
+      !window.confirm("A transfer is in progress. Leave anyway?")
+    )
+      return;
+    roomState.leaveRoom();
+  }
+
+  // The server has not told us yet whether we are still in this room
+  if (!roomState.ready) {
+    return <p className="p-8 text-center text-slate-400">Loading...</p>;
+  }
+
+  // Not in this room (Leave button, wrong address, room expired)? Go back to the landing page
   if (roomState.room !== code) return <Navigate to="/" replace />;
 
   const connected = peerStatus === "Connected directly!";
 
   return (
     <div className="min-h-screen">
-      <RoomHeader room={roomState.room} onLeave={roomState.leaveRoom} />
+      <ServerBanner online={roomState.serverOnline} />
+      <RoomHeader room={roomState.room} onLeave={handleLeave} />
 
       <main className="mx-auto max-w-5xl space-y-4 px-4 py-6">
         <PeerBanner other={other} peerStatus={peerStatus} />
@@ -107,6 +146,8 @@ export default function RoomPage({ roomState }) {
             onSend={file.sendFile}
             progress={file.sendProgress}
             notice={file.notice}
+            busy={file.sendBusy}
+            onCancel={file.cancelSending}
           />
           <FilesPanel file={file} />
         </div>

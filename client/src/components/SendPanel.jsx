@@ -1,7 +1,14 @@
 import { useRef, useState } from "react";
 import ProgressBar from "./ProgressBar";
 
-export default function SendPanel({ connected, onSend, progress, notice }) {
+export default function SendPanel({
+  connected,
+  onSend,
+  progress,
+  notice,
+  busy,
+  onCancel,
+}) {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
 
@@ -57,6 +64,15 @@ export default function SendPanel({ connected, onSend, progress, notice }) {
 
       {notice && <p className="mt-3 text-sm text-amber-400">{notice}</p>}
       {progress !== null && <ProgressBar label="Sending" percent={progress} />}
+
+      {busy && (
+        <button
+          onClick={onCancel}
+          className="mt-3 rounded-lg bg-slate-700 px-4 py-1.5 text-sm font-medium hover:bg-slate-600"
+        >
+          Cancel transfer
+        </button>
+      )}
     </div>
   );
 }

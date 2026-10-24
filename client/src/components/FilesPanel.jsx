@@ -42,7 +42,15 @@ export default function FilesPanel({ file }) {
           Received
         </h3>
         {file.receiveProgress !== null && (
-          <ProgressBar label="Receiving" percent={file.receiveProgress} />
+          <div>
+            <ProgressBar label="Receiving" percent={file.receiveProgress} />
+            <button
+              onClick={file.cancelReceiving}
+              className="mt-2 text-xs text-red-400 hover:underline"
+            >
+              Cancel
+            </button>
+          </div>
         )}
         {file.received.length === 0 && file.receiveProgress === null && (
           <p className="text-sm text-slate-500">Nothing received yet.</p>
