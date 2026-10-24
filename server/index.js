@@ -82,25 +82,34 @@ function enterRoom(socket, code) {
 io.on("connection", (socket) => {
   const clientId = String(socket.handshake.auth?.clientId || "").slice(0, 64);
 
-  // Is this a device that just reloaded? Look for its ghost.
-  const ghost = clientId
-    ? [...devices.values()].find((d) => d.ghost && d.clientId === clientId)
+  // Have we seen this browser tab before? (a reload, or a connection that came back)
+  const previous = clientId
+    ? [...devices.values()].find((d) => d.clientId === clientId)
     : null;
 
   let entry;
-  if (ghost) {
-    // Welcome back: take over the old seat
-    clearTimeout(ghost.timer);
-    devices.delete(ghost.id);
+  if (previous) {
+    // Take over the old seat straight away. Remove the old entry first, so the
+    // old connection's disconnect event finds nothing to clean up later.
+    clearTimeout(previous.timer);
+    devices.delete(previous.id);
+    if (!previous.ghost) {
+      // The old connection still looks alive to the server: close it
+      io.sockets.sockets.get(previous.id)?.disconnect(true);
+    }
+
     entry = {
       id: socket.id,
-      name: ghost.name,
-      room: ghost.room,
-      device: ghost.device,
+      name: previous.name,
+      room: previous.room,
+      device: previous.device,
       clientId,
     };
     devices.set(socket.id, entry);
-    socket.join(entry.room);
+    if (entry.room) {
+      socket.join(entry.room);
+      console.log(`Seat restored in room ${entry.room}`);
+    }
   } else {
     entry = {
       id: socket.id,
