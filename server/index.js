@@ -43,6 +43,36 @@ function makeCode() {
   return code;
 }
 
+// ---------- STUN / TURN details ----------
+
+const STUN_ONLY = [{ urls: "stun:stun.l.google.com:19302" }];
+let iceCache = { servers: null, time: 0 };
+
+async function getIceServers() {
+  const app = process.env.METERED_APP;
+  const key = process.env.METERED_API_KEY;
+  if (!app || !key) return STUN_ONLY; // no TURN set up: STUN only
+
+  // Reuse what we fetched in the last 10 minutes
+  if (iceCache.servers && Date.now() - iceCache.time < 10 * 60 * 1000) {
+    return iceCache.servers;
+  }
+
+  try {
+    const res = await fetch(
+      `https://${app}.metered.live/api/v1/turn/credentials?apiKey=${key}`
+    );
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    const servers = await res.json();
+    iceCache = { servers, time: Date.now() };
+    console.log(`TURN details loaded (${servers.length} servers)`);
+    return servers;
+  } catch (err) {
+    console.error("Could not load TURN details:", err.message);
+    return STUN_ONLY; // still works, just without the relay
+  }
+}
+
 // socket id -> { id, name, room, device, clientId, ghost, timer }
 // ghost = true means the device dropped out and its seat is being held for a moment
 const devices = new Map();
@@ -143,6 +173,11 @@ io.on("connection", (socket) => {
     socket.emit("profile-saved", { name: me.name, device: me.device });
     if (me.room) sendDeviceList(me.room);
   });
+
+    socket.on("get-ice-servers", async (reply) => {
+      if (typeof reply !== "function") return;
+      reply(await getIceServers());
+    });
 
   socket.on("create-room", () => {
     let code = makeCode();

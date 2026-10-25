@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { socket } from "../socket";
-import { ICE_CONFIG, LOW_BUFFER } from "../constants";
+import { ICE_CONFIG, LOW_BUFFER, FORCE_RELAY } from "../constants";
 
 export function usePeerConnection(channelRef, onMessage, onReady) {
   const [peerStatus, setPeerStatus] = useState("Not connected");
   const peerRef = useRef(null);
   const pendingRef = useRef([]);
+  const attemptRef = useRef(0); // goes up on every disconnect, to spot out-of-date attempts
+  const iceConfigRef = useRef(ICE_CONFIG);
+  const iceReadyRef = useRef(Promise.resolve());
   const onMessageRef = useRef(onMessage);
   const onReadyRef = useRef(onReady);
 
@@ -15,8 +18,24 @@ export function usePeerConnection(channelRef, onMessage, onReady) {
     onReadyRef.current = onReady;
   });
 
+  // Ask our server for the STUN and TURN details as soon as this page opens
+  useEffect(() => {
+    iceReadyRef.current = new Promise((resolve) => {
+      const timer = setTimeout(resolve, 4000); // do not wait forever
+      socket.emit("get-ice-servers", (servers) => {
+        clearTimeout(timer);
+        if (Array.isArray(servers) && servers.length > 0) {
+          iceConfigRef.current = { iceServers: servers };
+        }
+        resolve();
+      });
+    });
+  }, []);
+
   function createPeer(targetId) {
-    const pc = new RTCPeerConnection(ICE_CONFIG);
+    const config = { ...iceConfigRef.current };
+    if (FORCE_RELAY) config.iceTransportPolicy = "relay"; // testing only
+    const pc = new RTCPeerConnection(config);
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
@@ -33,7 +52,6 @@ export function usePeerConnection(channelRef, onMessage, onReady) {
     };
 
     peerRef.current = pc;
-    pendingRef.current = [];
     return pc;
   }
 
@@ -56,6 +74,11 @@ export function usePeerConnection(channelRef, onMessage, onReady) {
   // The device that starts the connection
   async function connectTo(targetId) {
     setPeerStatus("Connecting...");
+    const attempt = attemptRef.current;
+    await iceReadyRef.current; // make sure the STUN/TURN details have arrived
+    if (attempt !== attemptRef.current) return; // we disconnected meanwhile
+
+    pendingRef.current = [];
     const pc = createPeer(targetId);
     setupChannel(pc.createDataChannel("files"));
 
@@ -75,6 +98,7 @@ export function usePeerConnection(channelRef, onMessage, onReady) {
 
   // Close the current connection and reset
   function disconnect() {
+    attemptRef.current += 1;
     const channel = channelRef.current;
     if (channel) {
       channel.onopen = null;
@@ -94,7 +118,7 @@ export function usePeerConnection(channelRef, onMessage, onReady) {
   useEffect(() => {
     socket.on("signal", async ({ from, data }) => {
       try {
-        // NEW: the other page says "I'm here and listening"
+        // The other page says "I'm here and listening"
         if (data.ready) {
           if (onReadyRef.current) onReadyRef.current(from);
           return;
@@ -103,6 +127,10 @@ export function usePeerConnection(channelRef, onMessage, onReady) {
         if (data.description) {
           if (data.description.type === "offer") {
             setPeerStatus("Connecting...");
+            const attempt = attemptRef.current;
+            await iceReadyRef.current; // make sure the STUN/TURN details have arrived
+            if (attempt !== attemptRef.current) return;
+
             const pc = createPeer(from);
             pc.ondatachannel = (e) => setupChannel(e.channel);
             await pc.setRemoteDescription(data.description);
